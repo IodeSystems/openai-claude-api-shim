@@ -17,6 +17,22 @@ stream := shim.Transcode(resp.Body, shim.StreamOptions{}) // SSE in, OpenAI SSE 
 oaiErr := shim.Error(errorBody)                   // error envelope
 ```
 
+The other direction, for a caller that speaks only the Messages API, such as Claude Code,
+in front of an OpenAI backend:
+
+```go
+body, err := shim.ReverseRequest(messagesBody)
+reply, err := shim.ReverseResponse(openAIBody, model, signature)
+stream := shim.NewReverseStream(emit, model, signature) // stream.Feed(b), err := stream.End()
+```
+
+`signature` is the host's mark on thinking blocks made from another model's reasoning.
+Keep it stable: live conversations hold blocks signed with it. A body passed straight
+through to Anthropic should not go through this package.
+
+`shim.Estimate` prices usage this package did not translate, and `shim.StripThinking`
+removes those blocks before a conversation goes back to Anthropic.
+
 ## Why
 
 Anthropic's OpenAI-compatible endpoint has no prompt caching, so a caller that resends

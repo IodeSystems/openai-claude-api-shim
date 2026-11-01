@@ -83,3 +83,25 @@ func cost(own Prices, model string, u antUsage) *float64 {
 		float64(u.CacheReadInputTokens)*p.Read + float64(u.OutputTokens)*p.Output) / 1e6
 	return &usd
 }
+
+// Usage is a request's tokens, for Estimate. Input is what was neither read from
+// nor written to the cache; CacheWrite1h is the part of CacheWrite at the 1-hour
+// rate.
+type Usage struct {
+	Input, Output, CacheRead, CacheWrite, CacheWrite1h int
+}
+
+// Estimate is what u is worth in USD for model, by own then the built-in table,
+// and false when neither has a price. For a host that sees usage this package did
+// not translate, a passthrough to Anthropic for one. It is an estimate: say so.
+func Estimate(own Prices, model string, u Usage) (float64, bool) {
+	var a antUsage
+	a.InputTokens, a.OutputTokens = u.Input, u.Output
+	a.CacheReadInputTokens, a.CacheCreationInputTokens = u.CacheRead, u.CacheWrite
+	a.CacheCreation.Ephemeral1h = u.CacheWrite1h
+	c := cost(own, model, a)
+	if c == nil {
+		return 0, false
+	}
+	return *c, true
+}
