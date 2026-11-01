@@ -23,9 +23,9 @@
 // image_url, image URLs that are neither data: nor http(s), and roles other than
 // system, developer, user, assistant and tool.
 //
-// Cache writes cost more than input (1.25×, 2× for a 1h TTL). The usage this
-// package returns separates them, in cache_creation_input_tokens, for a meter
-// that wants to price them.
+// Anthropic reports tokens and no money. The usage this package returns carries
+// a cost in USD from the prices in price.go, cache writes at their own rate, and
+// the token classes apart for a meter that prices them itself.
 package shim
 
 import (
@@ -714,6 +714,9 @@ type antUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreation            struct {
+		Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 type antContent struct {
@@ -742,7 +745,10 @@ type oaiUsage struct {
 	// Anthropic's two cache classes, for a meter that prices writes.
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
-	PromptTokensDetails      struct {
+	// Cost is USD worked out from the tokens; see prices. Absent for a model with
+	// no price.
+	Cost                *float64 `json:"cost,omitempty"`
+	PromptTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
 }
@@ -750,13 +756,14 @@ type oaiUsage struct {
 // usageOf restates Anthropic usage in OpenAI's terms. Anthropic's
 // input_tokens EXCLUDES both cache classes, so the prompt total is the sum of
 // all three; cached_tokens is the read share only.
-func usageOf(u antUsage) oaiUsage {
+func usageOf(model string, u antUsage) oaiUsage {
 	var o oaiUsage
 	o.PromptTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 	o.CompletionTokens = u.OutputTokens
 	o.TotalTokens = o.PromptTokens + o.CompletionTokens
 	o.CacheReadInputTokens = u.CacheReadInputTokens
 	o.CacheCreationInputTokens = u.CacheCreationInputTokens
+	o.Cost = cost(model, u)
 	o.PromptTokensDetails.CachedTokens = u.CacheReadInputTokens
 	return o
 }
@@ -846,7 +853,7 @@ func Response(body []byte) ([]byte, error) {
 	}
 	ch.Message.ReasoningContent = reasoning.String()
 	ch.FinishReason = finishOf(in.StopReason)
-	out.Usage = usageOf(in.Usage)
+	out.Usage = usageOf(in.Model, in.Usage)
 	return json.Marshal(out)
 }
 
@@ -1078,6 +1085,9 @@ func (s *Stream) event(raw []byte) {
 		if ev.Usage.CacheCreationInputTokens > 0 {
 			s.usage.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
 		}
+		if ev.Usage.CacheCreation.Ephemeral1h > 0 {
+			s.usage.CacheCreation = ev.Usage.CacheCreation
+		}
 	case "message_stop":
 		if s.opts.RefusalAsError && s.refused != "" {
 			b, _ := json.Marshal(map[string]any{"error": map[string]any{"message": s.refused, "type": "refusal"}})
@@ -1139,7 +1149,7 @@ func (s *Stream) chunk(d oaiDelta, finish *string) {
 }
 
 func (s *Stream) usageChunk() {
-	u := usageOf(s.usage)
+	u := usageOf(s.model, s.usage)
 	s.write(oaiChunk{ID: s.id, Object: "chat.completion.chunk", Created: s.created, Model: s.model,
 		Choices: []oaiChunkChoice{}, Usage: &u})
 }

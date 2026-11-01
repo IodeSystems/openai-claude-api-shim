@@ -38,6 +38,9 @@ Opus 5.5: 92% of the prompt tokens read from cache.
   a result with no call becomes text, and the turns start and end with the user.
 - Usage reports `cached_tokens`, plus `cache_read_input_tokens` and
   `cache_creation_input_tokens`.
+- Usage also carries `cost` in USD. Anthropic reports tokens and no money, so it comes
+  from the table in `price.go` (see `PricesAsOf`), with cache writes at their own rate
+  and Haiku 5.5's long-prompt tier. A model not in the table gets no cost, not a guess.
 
 ## What does not cross
 
