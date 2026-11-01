@@ -9,7 +9,7 @@ import (
 
 func usd(t *testing.T, model string, u antUsage) float64 {
 	t.Helper()
-	c := cost(model, u)
+	c := cost(nil, model, u)
 	if c == nil {
 		t.Fatalf("%s has no price", model)
 	}
@@ -31,7 +31,7 @@ func TestCost(t *testing.T) {
 			t.Errorf("%s: %v, want %v", model, got, want)
 		}
 	}
-	if cost("gpt-5", u) != nil {
+	if cost(nil, "gpt-5", u) != nil {
 		t.Error("a model with no price got a cost")
 	}
 }
@@ -58,21 +58,44 @@ func TestCost_HaikuLongPrompt(t *testing.T) {
 }
 
 func TestCost_ReachesBothReplies(t *testing.T) {
-	out, err := Response([]byte(`{"id":"m","model":"claude-opus-5-5","content":[{"type":"text","text":"x"}],"stop_reason":"end_turn","usage":{"input_tokens":1000000,"output_tokens":0}}`))
+	out, err := Response([]byte(`{"id":"m","model":"claude-opus-5-5","content":[{"type":"text","text":"x"}],"stop_reason":"end_turn","usage":{"input_tokens":1000000,"output_tokens":0}}`), StreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var v struct {
 		Usage struct {
-			Cost *float64 `json:"cost"`
+			Cost      *float64 `json:"cost"`
+			Estimated bool     `json:"cost_estimated"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(out, &v); err != nil || v.Usage.Cost == nil || !near(*v.Usage.Cost, 4) {
+	if err := json.Unmarshal(out, &v); err != nil || v.Usage.Cost == nil || !near(*v.Usage.Cost, 4) || !v.Usage.Estimated {
 		t.Errorf("reply %s", out)
 	}
 	s := transcoded(t, sse(`{"type":"message_start","message":{"id":"m","model":"claude-opus-5-5","usage":{"input_tokens":1000000}}}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}`, `{"type":"message_stop"}`), StreamOptions{})
-	if !strings.Contains(s, `"cost":4`) {
+	if !strings.Contains(s, `"cost":4`) || !strings.Contains(s, `"cost_estimated":true`) {
 		t.Errorf("stream %s", s)
+	}
+}
+
+// A host's rates win, and add a model the table lacks.
+func TestCost_HostPrices(t *testing.T) {
+	own := Prices{"claude-opus": {Input: 1}, "acme": {Input: 2}}
+	u := antUsage{InputTokens: 1_000_000}
+	for model, want := range map[string]float64{"claude-opus-5-5": 1, "acme-1": 2, "claude-sonnet-5-5": 2} {
+		c := cost(own, model, u)
+		if c == nil || !near(*c, want) {
+			t.Errorf("%s: %v, want %v", model, c, want)
+		}
+	}
+}
+
+func TestCost_NoPriceSaysNothing(t *testing.T) {
+	out, err := Response([]byte(`{"id":"m","model":"acme","content":[{"type":"text","text":"x"}],"stop_reason":"end_turn","usage":{"input_tokens":1}}`), StreamOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "cost") {
+		t.Errorf("reply %s", out)
 	}
 }

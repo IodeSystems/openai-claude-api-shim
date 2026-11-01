@@ -12,7 +12,7 @@ body, err := shim.Request(openAIBody, shim.Options{})
 // POST body to https://api.anthropic.com/v1/messages with x-api-key and
 // anthropic-version: shim.APIVersion
 
-reply, err := shim.Response(messagesBody)         // JSON
+reply, err := shim.Response(messagesBody, shim.StreamOptions{}) // JSON
 stream := shim.Transcode(resp.Body, shim.StreamOptions{}) // SSE in, OpenAI SSE out
 oaiErr := shim.Error(errorBody)                   // error envelope
 ```
@@ -38,9 +38,11 @@ Opus 5.5: 92% of the prompt tokens read from cache.
   a result with no call becomes text, and the turns start and end with the user.
 - Usage reports `cached_tokens`, plus `cache_read_input_tokens` and
   `cache_creation_input_tokens`.
-- Usage also carries `cost` in USD. Anthropic reports tokens and no money, so it comes
-  from the table in `price.go` (see `PricesAsOf`), with cache writes at their own rate
-  and Haiku 5.5's long-prompt tier. A model not in the table gets no cost, not a guess.
+- Usage also carries an **estimated** `cost` in USD, marked `cost_estimated: true`.
+  Anthropic reports tokens and no money, so it comes from the table in `price.go` (see
+  `PricesAsOf`), with cache writes at their own rate and Haiku 5.5's long-prompt tier.
+  A model not in the table gets no cost, not a guess. A host passes its own rates in
+  `StreamOptions.Prices`; they win over the table.
 
 ## What does not cross
 

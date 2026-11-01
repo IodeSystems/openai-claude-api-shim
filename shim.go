@@ -24,8 +24,8 @@
 // system, developer, user, assistant and tool.
 //
 // Anthropic reports tokens and no money. The usage this package returns carries
-// a cost in USD from the prices in price.go, cache writes at their own rate, and
-// the token classes apart for a meter that prices them itself.
+// an estimated cost in USD (cost, cost_estimated) from price.go, cache writes at
+// their own rate; a host can override the table.
 package shim
 
 import (
@@ -745,9 +745,10 @@ type oaiUsage struct {
 	// Anthropic's two cache classes, for a meter that prices writes.
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
-	// Cost is USD worked out from the tokens; see prices. Absent for a model with
-	// no price.
+	// Cost is USD worked out from the tokens, so CostEstimated is true beside it:
+	// Anthropic reports no money. Absent for a model with no price.
 	Cost                *float64 `json:"cost,omitempty"`
+	CostEstimated       bool     `json:"cost_estimated,omitempty"`
 	PromptTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
@@ -756,14 +757,15 @@ type oaiUsage struct {
 // usageOf restates Anthropic usage in OpenAI's terms. Anthropic's
 // input_tokens EXCLUDES both cache classes, so the prompt total is the sum of
 // all three; cached_tokens is the read share only.
-func usageOf(model string, u antUsage) oaiUsage {
+func usageOf(own Prices, model string, u antUsage) oaiUsage {
 	var o oaiUsage
 	o.PromptTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 	o.CompletionTokens = u.OutputTokens
 	o.TotalTokens = o.PromptTokens + o.CompletionTokens
 	o.CacheReadInputTokens = u.CacheReadInputTokens
 	o.CacheCreationInputTokens = u.CacheCreationInputTokens
-	o.Cost = cost(model, u)
+	o.Cost = cost(own, model, u)
+	o.CostEstimated = o.Cost != nil
 	o.PromptTokensDetails.CachedTokens = u.CacheReadInputTokens
 	return o
 }
@@ -820,7 +822,7 @@ type oaiCompletion struct {
 // chat.completion. Text blocks concatenate into content, thinking blocks into
 // reasoning_content, tool_use blocks become tool_calls. Server-tool and
 // redacted-thinking blocks have no OpenAI form and are dropped.
-func Response(body []byte) ([]byte, error) {
+func Response(body []byte, opts StreamOptions) ([]byte, error) {
 	var in antResponse
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, err
@@ -853,7 +855,7 @@ func Response(body []byte) ([]byte, error) {
 	}
 	ch.Message.ReasoningContent = reasoning.String()
 	ch.FinishReason = finishOf(in.StopReason)
-	out.Usage = usageOf(in.Model, in.Usage)
+	out.Usage = usageOf(opts.Prices, in.Model, in.Usage)
 	return json.Marshal(out)
 }
 
@@ -904,8 +906,11 @@ func Transcode(r io.Reader, opts StreamOptions) io.Reader {
 	return pr
 }
 
-// StreamOptions are the choices a stream's reader makes.
+// StreamOptions are the choices a reply's reader makes.
 type StreamOptions struct {
+	// Prices override the built-in table for the cost in usage.
+	Prices Prices
+
 	// RefusalAsError reports a refusal as an {"error":…} event, with its category
 	// and explanation, instead of finish_reason content_filter: for a caller that
 	// would take the empty reply for an answer.
@@ -1149,7 +1154,7 @@ func (s *Stream) chunk(d oaiDelta, finish *string) {
 }
 
 func (s *Stream) usageChunk() {
-	u := usageOf(s.model, s.usage)
+	u := usageOf(s.opts.Prices, s.model, s.usage)
 	s.write(oaiChunk{ID: s.id, Object: "chat.completion.chunk", Created: s.created, Model: s.model,
 		Choices: []oaiChunkChoice{}, Usage: &u})
 }

@@ -353,7 +353,7 @@ func TestAnthropicResponseTranslation(t *testing.T) {
 			{"type":"tool_use","id":"toolu_1","name":"wx","input":{"city":"Oslo"}}
 		],
 		"stop_reason":"tool_use",
-		"usage":{"input_tokens":10,"cache_creation_input_tokens":200,"cache_read_input_tokens":3000,"output_tokens":42}}`))
+		"usage":{"input_tokens":10,"cache_creation_input_tokens":200,"cache_read_input_tokens":3000,"output_tokens":42}}`), StreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestAnthropicResponseTranslation(t *testing.T) {
 	}
 
 	// Tool call with no text: content is null, as OpenAI sends it.
-	out, _ = Response([]byte(`{"id":"m","content":[{"type":"tool_use","id":"t","name":"f","input":{}}],"stop_reason":"tool_use"}`))
+	out, _ = Response([]byte(`{"id":"m","content":[{"type":"tool_use","id":"t","name":"f","input":{}}],"stop_reason":"tool_use"}`), StreamOptions{})
 	if !strings.Contains(string(out), `"content":null`) {
 		t.Errorf("tool-only reply should carry content:null: %s", out)
 	}

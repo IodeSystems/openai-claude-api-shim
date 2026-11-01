@@ -2,73 +2,84 @@ package shim
 
 import "strings"
 
-// price is a model's rates in USD per million tokens.
-type price struct {
-	input, write5m, write1h, read, output float64
+// Price is a model's rates in USD per million tokens. Long, when set, replaces
+// them for a request whose prompt is over LongOver tokens, cache reads and writes
+// included, and applies to all of that request.
+type Price struct {
+	Input    float64 `json:"input"`
+	Write5m  float64 `json:"write_5m"`
+	Write1h  float64 `json:"write_1h"`
+	Read     float64 `json:"read"`
+	Output   float64 `json:"output"`
+	Long     *Price  `json:"long,omitempty"`
+	LongOver int     `json:"long_over,omitempty"`
 }
 
-// PricesAsOf is when prices was copied from
+// Prices maps a model id, or a prefix of one, to its rates. A host passes its own
+// through StreamOptions: they win over the built-in table and add models to it.
+type Prices map[string]Price
+
+// PricesAsOf is when the built-in table was copied from
 // https://platform.claude.com/docs/en/about-claude/pricing. Anthropic reports
-// tokens and no money, so a cost has to be worked out here; a model missing from
-// the table gets no cost, not a guess. Standard rates only: fast mode, batch and
-// inference_geo are not sent by this package.
+// tokens and no money, so a cost has to be worked out here, and it is an estimate:
+// usage marks it cost_estimated, and the provider's invoice is the real figure. A
+// model missing from the table gets no cost, not a guess. Standard rates only:
+// fast mode, batch and inference_geo are not sent by this package.
 const PricesAsOf = "2026-11-01"
 
-// prices is matched by longest prefix, so a dated id finds its model and
+// builtin is matched by longest prefix, so a dated id finds its model and
 // claude-opus-5-5 is not taken for claude-opus-5.
-var prices = map[string]price{
-	"claude-fable-5-1":  {10, 12.50, 20, 0.25, 50},
-	"claude-mythos-5-1": {10, 12.50, 20, 0.25, 50},
-	"claude-fable-5":    {10, 12.50, 20, 1, 50},
-	"claude-mythos-5":   {10, 12.50, 20, 1, 50},
-	"claude-opus-5-5":   {4, 5, 8, 0.20, 20},
-	"claude-opus-5":     {5, 6.25, 10, 0.50, 25},
-	"claude-opus-4-8":   {5, 6.25, 10, 0.50, 25},
-	"claude-opus-4-7":   {5, 6.25, 10, 0.50, 25},
-	"claude-opus-4-6":   {5, 6.25, 10, 0.50, 25},
-	"claude-opus-4-5":   {5, 6.25, 10, 0.50, 25},
-	"claude-sonnet-5-5": {2, 2.50, 4, 0.10, 10},
-	"claude-sonnet-5":   {2, 2.50, 4, 0.20, 10},
-	"claude-sonnet-4-6": {3, 3.75, 6, 0.30, 15},
-	"claude-sonnet-4-5": {3, 3.75, 6, 0.30, 15},
-	"claude-haiku-5-5":  {0.10, 0.125, 0.20, 0.01, 0.50},
-	"claude-haiku-4-5":  {1, 1.25, 2, 0.10, 5},
+var builtin = Prices{
+	"claude-fable-5-1":  {Input: 10, Write5m: 12.50, Write1h: 20, Read: 0.25, Output: 50},
+	"claude-mythos-5-1": {Input: 10, Write5m: 12.50, Write1h: 20, Read: 0.25, Output: 50},
+	"claude-fable-5":    {Input: 10, Write5m: 12.50, Write1h: 20, Read: 1, Output: 50},
+	"claude-mythos-5":   {Input: 10, Write5m: 12.50, Write1h: 20, Read: 1, Output: 50},
+	"claude-opus-5-5":   {Input: 4, Write5m: 5, Write1h: 8, Read: 0.20, Output: 20},
+	"claude-opus-5":     {Input: 5, Write5m: 6.25, Write1h: 10, Read: 0.50, Output: 25},
+	"claude-opus-4-8":   {Input: 5, Write5m: 6.25, Write1h: 10, Read: 0.50, Output: 25},
+	"claude-opus-4-7":   {Input: 5, Write5m: 6.25, Write1h: 10, Read: 0.50, Output: 25},
+	"claude-opus-4-6":   {Input: 5, Write5m: 6.25, Write1h: 10, Read: 0.50, Output: 25},
+	"claude-opus-4-5":   {Input: 5, Write5m: 6.25, Write1h: 10, Read: 0.50, Output: 25},
+	"claude-sonnet-5-5": {Input: 2, Write5m: 2.50, Write1h: 4, Read: 0.10, Output: 10},
+	"claude-sonnet-5":   {Input: 2, Write5m: 2.50, Write1h: 4, Read: 0.20, Output: 10},
+	"claude-sonnet-4-6": {Input: 3, Write5m: 3.75, Write1h: 6, Read: 0.30, Output: 15},
+	"claude-sonnet-4-5": {Input: 3, Write5m: 3.75, Write1h: 6, Read: 0.30, Output: 15},
+	"claude-haiku-5-5": {Input: 0.10, Write5m: 0.125, Write1h: 0.20, Read: 0.01, Output: 0.50, LongOver: 100_000,
+		Long: &Price{Input: 0.50, Write5m: 0.625, Write1h: 1, Read: 0.05, Output: 2.50}},
+	"claude-haiku-4-5": {Input: 1, Write5m: 1.25, Write1h: 2, Read: 0.10, Output: 5},
 }
 
-// longPrompt is the second tier: a Haiku 5.5 request whose prompt, cache reads
-// and writes included, is over 100,000 tokens pays these for all of it.
-var longPrompt = map[string]price{
-	"claude-haiku-5-5": {0.50, 0.625, 1, 0.05, 2.50},
-}
-
-const longPromptTokens = 100_000
-
-func lookup(table map[string]price, model string) (price, bool) {
-	var best string
-	for name := range table {
-		if strings.HasPrefix(model, name) && len(name) > len(best) {
-			best = name
+// lookup finds model's rates: the longest matching prefix in the host's table,
+// else in the built-in one. A host's entry wins even over a longer built-in one,
+// because it is the one somebody set.
+func lookup(own Prices, model string) (Price, bool) {
+	for _, table := range []Prices{own, builtin} {
+		best, found := "", false
+		for name := range table {
+			if strings.HasPrefix(model, name) && len(name) >= len(best) {
+				best, found = name, true
+			}
+		}
+		if found {
+			return table[best], true
 		}
 	}
-	p, ok := table[best]
-	return p, ok
+	return Price{}, false
 }
 
-// cost is what u cost in USD, nil when model has no price.
-func cost(model string, u antUsage) *float64 {
-	p, ok := lookup(prices, model)
+// cost is what u cost in USD, by own then the built-in table; nil with no price.
+func cost(own Prices, model string, u antUsage) *float64 {
+	p, ok := lookup(own, model)
 	if !ok {
 		return nil
 	}
-	if u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > longPromptTokens {
-		if long, ok := lookup(longPrompt, model); ok {
-			p = long
-		}
+	if p.Long != nil && p.LongOver > 0 && u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > p.LongOver {
+		p = *p.Long
 	}
 	// Writes not broken down by TTL are at the 5-minute rate, the default.
 	long := u.CacheCreation.Ephemeral1h
 	short := u.CacheCreationInputTokens - long
-	usd := (float64(u.InputTokens)*p.input + float64(short)*p.write5m + float64(long)*p.write1h +
-		float64(u.CacheReadInputTokens)*p.read + float64(u.OutputTokens)*p.output) / 1e6
+	usd := (float64(u.InputTokens)*p.Input + float64(short)*p.Write5m + float64(long)*p.Write1h +
+		float64(u.CacheReadInputTokens)*p.Read + float64(u.OutputTokens)*p.Output) / 1e6
 	return &usd
 }
