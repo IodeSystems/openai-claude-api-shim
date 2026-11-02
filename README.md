@@ -33,6 +33,9 @@ through to Anthropic should not go through this package.
 `shim.Estimate` prices usage this package did not translate, and `shim.StripThinking`
 removes those blocks before a conversation goes back to Anthropic.
 
+Aliases: `IsAlias`, `Latest` and `LatestIn` resolve `opus-latest`, `sonnet-latest` and so on
+to the newest model in that line, from a `/v1/models` listing. `PriceOf` is a model's rates.
+
 ## Why
 
 Anthropic's OpenAI-compatible endpoint has no prompt caching, so a caller that resends

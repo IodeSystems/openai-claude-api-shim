@@ -67,6 +67,9 @@ func lookup(own Prices, model string) (Price, bool) {
 	return Price{}, false
 }
 
+// PriceOf is model's rates, by own then the built-in table.
+func PriceOf(own Prices, model string) (Price, bool) { return lookup(own, model) }
+
 // cost is what u cost in USD, by own then the built-in table; nil with no price.
 func cost(own Prices, model string, u antUsage) *float64 {
 	p, ok := lookup(own, model)
