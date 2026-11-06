@@ -19,9 +19,15 @@
 //     accepts blocks it signed. reasoning_content on a replayed turn is dropped.
 //   - Server tools and redacted thinking in a reply have no OpenAI form.
 //
-// Refused with an error rather than lost: content parts other than text and
-// image_url, image URLs that are neither data: nor http(s), and roles other than
-// system, developer, user, assistant and tool.
+// Refused with an error rather than lost, every one wrapping ErrUnsupportedContent:
+// audio and video parts (the Messages API has no audio or video input), a file
+// that is neither a PDF nor text, a file given by id or by URL rather than as a
+// data: URI, image URLs that are neither data: nor http(s), and any other part
+// type. Roles other than system, developer, user, assistant and tool are refused
+// too.
+//
+// Files cross as document blocks: a PDF as a base64 source, text as a plain-text
+// source. Citations are not enabled, so a reply carries no citation blocks.
 //
 // Anthropic reports tokens and no money. The usage this package returns carries
 // an estimated cost in USD (cost, cost_estimated) from price.go, cache writes at
@@ -30,11 +36,14 @@ package shim
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // defaultMaxTokens is the max_tokens sent when the caller set none and
@@ -97,11 +106,25 @@ type oaiToolCall struct {
 // OpenAI's, but clients written against OpenRouter put it on parts; it is
 // honoured verbatim and counts against the breakpoint cap.
 type oaiPart struct {
-	Type         string          `json:"type"`
-	Text         string          `json:"text"`
-	Refusal      string          `json:"refusal"`
-	ImageURL     json.RawMessage `json:"image_url"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	Refusal  string          `json:"refusal"`
+	ImageURL json.RawMessage `json:"image_url"`
+	File     *oaiFile        `json:"file"`
+	// Filename and FileData are the flat input_file part of OpenAI's Responses
+	// API, which some chat clients send on the chat endpoint too.
+	Filename     string          `json:"filename"`
+	FileData     string          `json:"file_data"`
+	FileID       string          `json:"file_id"`
 	CacheControl json.RawMessage `json:"cache_control"`
+}
+
+// oaiFile is the file of an OpenAI "file" part: file_data is a data: URI
+// ("data:application/pdf;base64,…"), file_id an id from OpenAI's Files API.
+type oaiFile struct {
+	Filename string `json:"filename"`
+	FileData string `json:"file_data"`
+	FileID   string `json:"file_id"`
 }
 
 type oaiTool struct {
@@ -143,6 +166,7 @@ type antMessage struct {
 type antBlock struct {
 	Type         string          `json:"type"`
 	Text         string          `json:"text,omitempty"`
+	Title        string          `json:"title,omitempty"` // document blocks
 	Source       *antSource      `json:"source,omitempty"`
 	ID           string          `json:"id,omitempty"`
 	Name         string          `json:"name,omitempty"`
@@ -154,7 +178,7 @@ type antBlock struct {
 }
 
 type antSource struct {
-	Type      string `json:"type"` // base64 | url
+	Type      string `json:"type"` // base64 | url | text
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
@@ -373,9 +397,84 @@ func partToBlock(p oaiPart) (antBlock, bool, error) {
 			return antBlock{}, false, err
 		}
 		return antBlock{Type: "image", Source: src, CacheControl: p.CacheControl}, true, nil
+	case "file", "input_file":
+		f := oaiFile{Filename: p.Filename, FileData: p.FileData, FileID: p.FileID}
+		if p.File != nil {
+			f = *p.File
+		}
+		b, err := documentBlock(f)
+		if err != nil {
+			return antBlock{}, false, err
+		}
+		b.CacheControl = p.CacheControl
+		return b, true, nil
+	case "input_audio", "audio_url":
+		return antBlock{}, false, fmt.Errorf("%w: a %s part: the Claude Messages API has no audio input; transcribe the audio and send the text", ErrUnsupportedContent, p.Type)
+	case "video_url", "input_video":
+		return antBlock{}, false, fmt.Errorf("%w: a %s part: the Claude Messages API has no video input; send frames as images or a transcript as text", ErrUnsupportedContent, p.Type)
 	default:
-		return antBlock{}, false, fmt.Errorf("content part type %q is not supported by an Anthropic backend", p.Type)
+		return antBlock{}, false, fmt.Errorf("%w: content part type %q", ErrUnsupportedContent, p.Type)
 	}
+}
+
+// ErrUnsupportedContent is wrapped by every refusal of a content part the
+// Messages API cannot take — audio, video, a file that is not PDF or text, a
+// file by id or URL. The request was not sent; a caller tests it with errors.Is
+// to fall back (transcribe, describe, or drop the part) instead of matching text.
+var ErrUnsupportedContent = errors.New("content not supported by the Claude Messages API")
+
+// maxTitle is the Messages API's limit on a document title, in characters.
+const maxTitle = 500
+
+// documentBlock maps an OpenAI file to a document block. Only a data: URI
+// crosses: an OpenAI file_id names a file in OpenAI's store, not Anthropic's,
+// and a URL in file_data is an OpenRouter extension this package does not
+// fetch or forward. A PDF becomes a base64 source; text (text/*, JSON, XML)
+// is decoded to a plain-text source, the one text media type documents take.
+func documentBlock(f oaiFile) (antBlock, error) {
+	if f.FileID != "" && f.FileData == "" {
+		return antBlock{}, fmt.Errorf("%w: a file part by file_id: an OpenAI file id is not a Claude file id; send the bytes as a data: URI in file_data", ErrUnsupportedContent)
+	}
+	if !strings.HasPrefix(f.FileData, "data:") {
+		return antBlock{}, fmt.Errorf("%w: a file part must carry file_data as data:<media-type>;base64,<data>", ErrUnsupportedContent)
+	}
+	meta, data, ok := strings.Cut(strings.TrimPrefix(f.FileData, "data:"), ",")
+	media, enc, _ := strings.Cut(meta, ";")
+	media = strings.ToLower(strings.TrimSpace(media))
+	if !ok || enc != "base64" || media == "" {
+		return antBlock{}, fmt.Errorf("file_data must be data:<media-type>;base64,<data>")
+	}
+	title := f.Filename
+	if r := []rune(title); len(r) > maxTitle {
+		title = string(r[:maxTitle])
+	}
+	switch {
+	case media == "application/pdf":
+		return antBlock{Type: "document", Title: title,
+			Source: &antSource{Type: "base64", MediaType: media, Data: data}}, nil
+	case isTextMedia(media):
+		raw, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			return antBlock{}, fmt.Errorf("file_data (%s) is not valid base64: %v", media, err)
+		}
+		if !utf8.Valid(raw) {
+			return antBlock{}, fmt.Errorf("file_data (%s) is not UTF-8 text", media)
+		}
+		return antBlock{Type: "document", Title: title,
+			Source: &antSource{Type: "text", MediaType: "text/plain", Data: string(raw)}}, nil
+	default:
+		return antBlock{}, fmt.Errorf("%w: a %s file: documents take PDF or plain text; convert it first", ErrUnsupportedContent, media)
+	}
+}
+
+// isTextMedia reports a media type whose bytes are text a plain-text document
+// can carry.
+func isTextMedia(media string) bool {
+	switch media {
+	case "application/json", "application/xml", "application/x-yaml", "application/yaml":
+		return true
+	}
+	return strings.HasPrefix(media, "text/")
 }
 
 // imageSource maps an OpenAI image_url ({url} or, from lax clients, a bare
@@ -402,7 +501,7 @@ func imageSource(raw json.RawMessage) (*antSource, error) {
 	case strings.HasPrefix(u, "http://"), strings.HasPrefix(u, "https://"):
 		return &antSource{Type: "url", URL: u}, nil
 	default:
-		return nil, fmt.Errorf("image url must be a data: or http(s) URL")
+		return nil, fmt.Errorf("%w: image url must be a data: or http(s) URL", ErrUnsupportedContent)
 	}
 }
 

@@ -71,8 +71,14 @@ Opus 5.5: 92% of the prompt tokens read from cache.
 - Thinking blocks. An OpenAI history has no signature, so they are not replayed.
 - Server tools and redacted thinking in a reply.
 
-Content parts other than text and `image_url`, and unknown roles, are an error, not
-dropped.
+A `file` part (or flat `input_file`) whose `file_data` is a data: URI crosses as a
+`document` block: a PDF as a base64 source, text (`text/*`, JSON, XML, YAML) as a
+plain-text source, the filename as its title. Citations are not enabled.
+
+Audio (`input_audio`, `audio_url`) and video (`video_url`, `input_video`) parts, a file
+by `file_id` or by URL, a file that is neither PDF nor text, any other part type, and
+unknown roles are an error, not dropped. Every content refusal wraps
+`ErrUnsupportedContent`, so a caller can fall back with `errors.Is`.
 
 ## License
 

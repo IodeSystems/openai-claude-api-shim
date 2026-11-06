@@ -41,6 +41,7 @@ func NewReverseStream(emit func([]byte), model, signature string) *ReverseStream
 type antInBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
+	Title     string          `json:"title"`
 	Source    *antInSource    `json:"source"`
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
@@ -100,7 +101,7 @@ func blocksOf(raw json.RawMessage) ([]antInBlock, error) {
 // Anthropic does not run this package on it.
 var billingLine = regexp.MustCompile(`(?m)^x-anthropic-billing-header:[^\n]*\n?`)
 
-// oaiPartOf turns a text or image block into an OpenAI content part.
+// oaiPartOf turns a text, image or document block into an OpenAI content part.
 func oaiPartOf(b antInBlock) (map[string]any, error) {
 	switch b.Type {
 	case "text":
@@ -121,7 +122,17 @@ func oaiPartOf(b antInBlock) (map[string]any, error) {
 		if b.Source != nil && b.Source.Type == "text" {
 			return map[string]any{"type": "text", "text": b.Source.Data}, nil
 		}
-		return nil, fmt.Errorf("document blocks other than plain text are not supported for non-Anthropic models")
+		// A base64 PDF is OpenAI's file part, the shape Request reads back.
+		// file_data must be a data: URI there, so a URL or file_id source has
+		// no OpenAI form.
+		if b.Source != nil && b.Source.Type == "base64" && b.Source.MediaType == "application/pdf" {
+			f := map[string]string{"file_data": "data:application/pdf;base64," + b.Source.Data}
+			if b.Title != "" {
+				f["filename"] = b.Title
+			}
+			return map[string]any{"type": "file", "file": f}, nil
+		}
+		return nil, fmt.Errorf("document blocks other than plain text and base64 PDF are not supported for non-Anthropic models")
 	}
 	return nil, nil // thinking, redacted_thinking, server tool blocks: dropped
 }
